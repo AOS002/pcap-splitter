@@ -6,6 +6,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <unistd.h>
 
 int fileExists(char *fname)
 {
@@ -60,7 +61,8 @@ struct Connection * getConnection(struct Connection *c, struct Connection *new)
 }
 
 
-struct Connection *head = NULL;  
+struct Connection *head = NULL;
+char *output_directory_path, *src_ip_filter, *non_tcp_file_path;  
 
 void splitPcap(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
@@ -70,6 +72,7 @@ void splitPcap(u_char *args, const struct pcap_pkthdr *header, const u_char *pac
   const struct tcphdr* tcp_header;
   int size_eth_header;
   int size_ip_header;
+  int is_tcp=0;
   pcap_dumper_t *dumper;
   pcap_t *descr=(pcap_t*)args;
   eth_header = (struct ether_header*)(packet);
@@ -79,17 +82,18 @@ void splitPcap(u_char *args, const struct pcap_pkthdr *header, const u_char *pac
   {
     size_eth_header = sizeof(struct ether_header);
     ip_header = (struct ip*)(packet + size_eth_header);    
+    char source_ip[INET_ADDRSTRLEN];
+    char dest_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(ip_header->ip_src), source_ip, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &(ip_header->ip_dst), dest_ip, INET_ADDRSTRLEN);
 
-    //Check if it is of type TCP
-    if(ip_header->ip_p == IPPROTO_TCP)
+    //Check if it is of type TCP & also whether the IP src filter is set
+    // The order of the OR condition is important, since if it is NULL it cannot do strcmp
+    if((ip_header->ip_p == IPPROTO_TCP) && (src_ip_filter==NULL || strcmp(src_ip_filter,source_ip)==0))
     {
+      is_tcp=1;
       size_ip_header = sizeof(struct ip);
       tcp_header = (struct tcphdr*)(packet + size_eth_header +size_ip_header);
-
-      char source_ip[INET_ADDRSTRLEN];
-      char dest_ip[INET_ADDRSTRLEN];
-      inet_ntop(AF_INET, &(ip_header->ip_src), source_ip, INET_ADDRSTRLEN);
-      inet_ntop(AF_INET, &(ip_header->ip_dst), dest_ip, INET_ADDRSTRLEN);
 
       u_short source_port;
       u_short dest_port;
@@ -111,7 +115,7 @@ void splitPcap(u_char *args, const struct pcap_pkthdr *header, const u_char *pac
       }
 
       char fname[20];      
-      sprintf (fname, "%d%s", inserted_node->file_name_no,".pcap");
+      sprintf (fname, "%s%s%d%s",output_directory_path,"/" ,inserted_node->file_name_no,".pcap");
 
       if (fileExists(fname) == 1)
       {
@@ -124,15 +128,58 @@ void splitPcap(u_char *args, const struct pcap_pkthdr *header, const u_char *pac
       pcap_dump((u_char*)dumper,header,packet);
       pcap_dump_close(dumper);
     }
-  }  
+    
+  }
+  if ((non_tcp_file_path!=NULL) && (is_tcp==0))
+    {
+      if (fileExists(non_tcp_file_path) == 1)
+      {
+        dumper = pcap_dump_open_append(descr, non_tcp_file_path);
+      }
+      else
+      {
+        dumper = pcap_dump_open(descr, non_tcp_file_path); 
+      }
+      pcap_dump((u_char*)dumper,header,packet);
+      pcap_dump_close(dumper);
+    }  
 }
 
 int main(int argc, char *argv[])
 {
   char errbuf[PCAP_ERRBUF_SIZE];
   pcap_t *descr;
+  char *file_path;
+  int c;
 
-  descr = pcap_open_offline("temp.pcap", errbuf);  
+  while ((c = getopt (argc, argv, "i:o:f:j:")) != -1)
+  {
+    switch(c)
+    {
+      //-i file_path: (Mandatory) Specifies a pcap file as input.
+      case 'i':
+        file_path=optarg;
+        break;
+
+      //-o directory_path: (Mandatory) Specifies a directory to output pcap files to.
+      case 'o':
+        output_directory_path=optarg;
+        break;
+
+      //-f src_ip: (Optional) If this option is given, ignore all traffic that is not from the specified source IP.
+      case 'f':
+        src_ip_filter=optarg;
+        break;
+
+      //-j file_path: (Optional) If this option is given, all non-TCP traffic should be stored into a single pcap file. Otherwise, all non-TCP traffic should be ignored.
+      case 'j':
+        non_tcp_file_path=optarg;
+        break;
+    }    
+  }
+
+  descr = pcap_open_offline(file_path, errbuf);  
+  //descr = pcap_open_offline("temp.pcap", errbuf);  
   if(descr == NULL)
   {
     printf("Unable to open file!");
